@@ -1,0 +1,10 @@
+{
+  "Name": "stardew",
+  "Author": "Kim Josell",
+  "Version": "1.0.0",
+  "Description": "this mod prints the key pressed in the console",
+  "UniqueID": "kim.stardew",
+  "EntryDll": "stardew.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}

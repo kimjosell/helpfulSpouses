@@ -1,0 +1,10 @@
+{
+  "Name": "Helpful Spouses",
+  "Author": "Lugialink",
+  "Version": "1.0.0",
+  "Description": "Makes your spouse smarter — they can follow you, water your crops.",
+  "UniqueID": "Lugialink.HelpfulSpouses",
+  "EntryDll": "helpfulSpouses.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}
