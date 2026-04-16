@@ -1,13 +1,17 @@
 ﻿using HarmonyLib;
 using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
+using StardewValley.Extensions;
 using StardewValley.Locations;
 using StardewValley.Pathfinding;
 using StardewValley.TerrainFeatures;
 using System;
+using System.Collections.Generic;
 using System.Linq;
+using xTile.Dimensions;
 
 namespace helpfulSpouses
 {
@@ -19,6 +23,7 @@ namespace helpfulSpouses
         static CompanionState _currentState = CompanionState.Idle;
         static IMonitor? _monitor;
         static bool _seedJustPlanted;
+        static bool _isAnimatingWatering = false;
 
         public override void Entry(IModHelper helper)
         {
@@ -30,6 +35,7 @@ namespace helpfulSpouses
             helper.Events.GameLoop.UpdateTicked += this.GameLoop_UpdateTicked;
             helper.Events.Player.Warped += this.Player_Warped;
             helper.Events.Player.InventoryChanged += this.Player_InventoryChanged;
+            helper.Events.Content.AssetRequested += this.Content_AssetRequested;
 
             var harmony = new Harmony(this.ModManifest.UniqueID);
             harmony.Patch(
@@ -40,7 +46,24 @@ namespace helpfulSpouses
                 original: AccessTools.Method(typeof(NPC), "checkAction",
                 new[] { typeof(Farmer), typeof(GameLocation) }),
                 prefix: new HarmonyMethod(typeof(ModEntry), nameof(CheckActionPatch))
-                );
+            );
+            harmony.Patch(
+                original: AccessTools.Method(typeof(NPC), nameof(NPC.tryToReceiveActiveObject),
+                new[] { typeof(Farmer), typeof(bool) }),
+                prefix: new HarmonyMethod(typeof(ModEntry), nameof(TryReceiveActiveObjectPatch))
+            );
+            harmony.Patch(
+                original: AccessTools.Method(typeof(NPC), nameof(NPC.canTalk)),
+                prefix: new HarmonyMethod(typeof(ModEntry), nameof(CanTalkPatch))
+            );
+        }
+
+        private void Content_AssetRequested(object? sender, AssetRequestedEventArgs e)
+        {
+            if (e.NameWithoutLocale.IsEquivalentTo("Characters/TestWatering"))
+            {
+                e.LoadFromModFile<Texture2D>("assets/haley_watering_test.png", AssetLoadPriority.Medium);
+            }
         }
 
         // Detects when the player consumes a seed from their inventory
@@ -101,9 +124,11 @@ namespace helpfulSpouses
         // Called every second while in Watering state
         private void WateringBehavior()
         {
-            npcObj.farmerPassesThrough = true;
             if (npcObj == null) return;
-
+            npcObj.Sprite.SpriteWidth = 16;
+            npcObj.Sprite.LoadTexture("Characters/" + npcObj.Name);
+            _isAnimatingWatering = false;
+            npcObj.farmerPassesThrough = true;
             // If the NPC is still walking to a tile, do nothing until it arrives
             if (npcObj.controller != null) return;
 
@@ -118,23 +143,98 @@ namespace helpfulSpouses
                 return;
             }
 
-            // Always go to the closest tile — greedy but good enough for now
-            Vector2 target = unwateredCrops
+            Vector2 targetCrop = unwateredCrops
                 .OrderBy(tile => Vector2.Distance(Utility.PointToVector2(npcObj.TilePoint), tile))
                 .First();
 
-            npcObj.controller = new PathFindController(npcObj, npcObj.currentLocation, new Point((int)target.X, (int)target.Y), 2)
+            Vector2 npcTile = Utility.PointToVector2(npcObj.TilePoint);
+            Vector2[] adjacentOffsets = { new Vector2(0, 1), new Vector2(1, 0), new Vector2(-1, 0), new Vector2(0, -1) };
+
+            Vector2 standingTile = adjacentOffsets
+                .Select(offset => targetCrop + offset)
+                .Where(tile => npcObj.currentLocation.isTilePassable(new Location((int)tile.X, (int)tile.Y), Game1.viewport))
+                .OrderBy(tile => Vector2.Distance(npcTile, tile))
+                .DefaultIfEmpty(targetCrop)
+                .First();
+
+            npcObj.controller = new PathFindController(npcObj, npcObj.currentLocation, new Point((int)standingTile.X, (int)standingTile.Y), 2)
             {
                 endBehaviorFunction = (character, location) =>
                 {
-                    if (location.terrainFeatures.TryGetValue(target, out var feature) && feature is HoeDirt dirt)
+                    if (location.terrainFeatures.TryGetValue(targetCrop, out var feature) && feature is HoeDirt dirt)
                     {
-                        dirt.state.Value = 1; // 0 = dry, 1 = watered
-                        npcObj!.doEmote(20);  // visual feedback (water drop)
-                        this.Monitor.Log($"Watered tile at {target}", LogLevel.Debug);
+                        npcObj.Sprite.SpriteWidth = 18;
+                        npcObj.Sprite.LoadTexture("Characters/TestWatering");
+
+                        Vector2 directionToTarget = targetCrop - Utility.PointToVector2(npcObj.TilePoint);
+                        float absX = Math.Abs(directionToTarget.X);
+                        float absY = Math.Abs(directionToTarget.Y);
+
+                        if (absX > absY * 1.5f)
+                            npcObj.FacingDirection = directionToTarget.X > 0 ? 1 : 3;
+                        else if (absY > absX * 1.5f)
+                            npcObj.FacingDirection = directionToTarget.Y > 0 ? 2 : 0;
+
+                        _isAnimatingWatering = true;
+                        Game1.playSound("wateringCan");
+                        SpawnWateringParticles(location, targetCrop);
+                        dirt.state.Value = 1;
+
+                        this.Monitor.Log($"Watered tile at {targetCrop} from {standingTile}", LogLevel.Debug);
                     }
                 }
             };
+        }
+        private void SpawnWateringParticles(GameLocation location, Vector2 targetCrop)
+        {
+            location.temporarySprites.Add(new TemporaryAnimatedSprite(
+                13,
+                new Vector2(targetCrop.X * 64f, targetCrop.Y * 64f),
+                Color.White,
+                10,
+                Game1.random.NextBool(),
+                70f,
+                0,
+                64,
+                (targetCrop.Y * 64f + 32f) / 10000f - 0.01f
+            ));
+
+            if (npcObj.FacingDirection == 0) return;
+
+            Vector2 sprayOrigin = new Vector2(npcObj.Position.X - 32f - 4f, npcObj.Position.Y - 16f - 4f);
+            switch (npcObj.FacingDirection)
+            {
+                case 1: sprayOrigin.X += 136f; break;
+                case 3: sprayOrigin.X -= 72f; break;
+                case 2: sprayOrigin.X += 72f; sprayOrigin.Y += 44f; break;
+            }
+
+            Microsoft.Xna.Framework.Rectangle boundingBox = npcObj.GetBoundingBox();
+            for (int i = 0; i < 30; i++)
+            {
+                location.temporarySprites.Add(new TemporaryAnimatedSprite(
+                    "",
+                    new Microsoft.Xna.Framework.Rectangle(0, 0, 1, 1),
+                    999f,
+                    1,
+                    999,
+                    sprayOrigin + new Vector2(Game1.random.Next(-3, 0) * 4, Game1.random.Next(2) * 4),
+                    flicker: false,
+                    flipped: false,
+                    (float)(boundingBox.Bottom + 32) / 10000f,
+                    0.04f,
+                    Game1.random.Choose(Color.DeepSkyBlue, Color.LightBlue),
+                    4f,
+                    0f,
+                    0f,
+                    0f
+                )
+                {
+                    delayBeforeAnimationStart = i * 15,
+                    motion = new Vector2((float)Game1.random.Next(-10, 11) / 100f, 0.5f),
+                    acceleration = new Vector2(0f, 0.1f)
+                });
+            }
         }
 
         // Returns only HoeDirt tiles that have a planted seed AND are dry
@@ -155,6 +255,23 @@ namespace helpfulSpouses
             positionHistory.Clear();
             for (int i = 0; i < FOLLOW_DELAY; i++)
                 positionHistory.Enqueue(npcObj.Position);
+        }
+
+        static bool CanTalkPatch(NPC __instance, ref bool __result)
+        {
+            if (_currentState != CompanionState.Idle && __instance?.isMarried() == true)
+            {
+                __result = false;
+                return false;
+            }
+            return true;
+        }
+
+        static bool TryReceiveActiveObjectPatch(NPC __instance)
+        {
+            if (_currentState != CompanionState.Idle && __instance?.isMarried() == true)
+                return false;
+            return true;
         }
 
         static bool CheckActionPatch(NPC __instance)
@@ -186,9 +303,31 @@ namespace helpfulSpouses
 
         private void GameLoop_UpdateTicked(object? sender, UpdateTickedEventArgs e)
         {
+            if (_currentState != CompanionState.Idle && npcObj != null)
+            {
+                Point cursorTile = new Point(
+                    (Game1.getOldMouseX() + Game1.viewport.X) / 64,
+                    (Game1.getOldMouseY() + Game1.viewport.Y) / 64
+                );
+                if (npcObj.TilePoint == cursorTile)
+                    Game1.isSpeechAtCurrentCursorTile = false;
+            }
+
             if (_currentState == CompanionState.Following && npcObj != null)
             {
                 FollowingBehavior(npcObj, positionHistory);
+            }
+            if(_isAnimatingWatering == true && npcObj != null)
+            {
+                int startFrame = npcObj.FacingDirection switch
+                {
+                    0 => 8,
+                    1 => 4,
+                    2 => 0,
+                    3 => 12,
+                    _ => 0
+                };
+                npcObj.Sprite.Animate(Game1.currentGameTime, startFrame, 4, 230f);
             }
         }
 
