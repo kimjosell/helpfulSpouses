@@ -6,10 +6,12 @@ using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.Extensions;
 using StardewValley.Locations;
+using StardewValley.Menus;
 using StardewValley.Pathfinding;
 using StardewValley.TerrainFeatures;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using xTile.Dimensions;
 
@@ -24,6 +26,13 @@ namespace helpfulSpouses
         static IMonitor? _monitor;
         static bool _seedJustPlanted;
         static bool _isAnimatingWatering = false;
+        string _currentOutfit = "default";
+
+        Response[] choresOptions = new Response[]
+        {
+            new Response("follow", "Quiero que seas mi perra y me sigas"),
+            new Response("shopping", "Ve con el maldito de pierre y compra algo")
+        };
 
         public override void Entry(IModHelper helper)
         {
@@ -58,11 +67,31 @@ namespace helpfulSpouses
             );
         }
 
+        private string? ResolveOutfit(string npcName, string action, string outfit)
+        {
+            if (File.Exists(Path.Combine(Helper.DirectoryPath, $"assets/sprites/{npcName}/{action}_{outfit}.png")))
+                return outfit;
+
+            if (outfit != "default" && File.Exists(Path.Combine(Helper.DirectoryPath, $"assets/sprites/{npcName}/{action}_default.png")))
+                return "default";
+
+            return null;
+        }
+
         private void Content_AssetRequested(object? sender, AssetRequestedEventArgs e)
         {
-            if (e.NameWithoutLocale.IsEquivalentTo("Characters/TestWatering"))
+            string prefix = "Characters/Companion_";
+            string assetName = e.NameWithoutLocale.ToString();
+            if (assetName.StartsWith(prefix))
             {
-                e.LoadFromModFile<Texture2D>("assets/haley_watering_test.png", AssetLoadPriority.Medium);
+                string remaining = assetName.Substring(prefix.Length);
+                int firstUnderscore = remaining.IndexOf('_');
+                string npcName = remaining.Substring(0, firstUnderscore);
+                string animationFile = remaining.Substring(firstUnderscore + 1);
+
+                string modFilePath = $"assets/sprites/{npcName}/{animationFile}.png";
+                if (File.Exists(Path.Combine(Helper.DirectoryPath, modFilePath)))
+                    e.LoadFromModFile<Texture2D>(modFilePath, AssetLoadPriority.Medium);
             }
         }
 
@@ -163,8 +192,18 @@ namespace helpfulSpouses
                 {
                     if (location.terrainFeatures.TryGetValue(targetCrop, out var feature) && feature is HoeDirt dirt)
                     {
-                        npcObj.Sprite.SpriteWidth = 18;
-                        npcObj.Sprite.LoadTexture("Characters/TestWatering");
+                        string resolvedOutfit = ResolveOutfit(npcObj.Name, "watering", _currentOutfit);
+
+                        if (resolvedOutfit != null)
+                        {
+                            npcObj.Sprite.SpriteWidth = 18;
+                            npcObj.Sprite.LoadTexture($"Characters/Companion_{npcObj.Name}_watering_{resolvedOutfit}");
+                            _isAnimatingWatering = true;
+                        }
+                        else
+                        {
+                            npcObj.doEmote(16);
+                        }
 
                         Vector2 directionToTarget = targetCrop - Utility.PointToVector2(npcObj.TilePoint);
                         float absX = Math.Abs(directionToTarget.X);
@@ -175,7 +214,6 @@ namespace helpfulSpouses
                         else if (absY > absX * 1.5f)
                             npcObj.FacingDirection = directionToTarget.Y > 0 ? 2 : 0;
 
-                        _isAnimatingWatering = true;
                         Game1.playSound("wateringCan");
                         SpawnWateringParticles(location, targetCrop);
                         dirt.state.Value = 1;
@@ -427,20 +465,65 @@ namespace helpfulSpouses
                 {
                     if (_currentState != CompanionState.Following)
                     {
-                        _currentState = CompanionState.Following;
-                        positionHistory.Clear();
-                        for (int i = 0; i < FOLLOW_DELAY; i++)
-                            positionHistory.Enqueue(npcObj.Position); // ← posición del NPC, no del player
-                        npcObj.farmerPassesThrough = true;
-                        DeactivateControllers(npcObj);
-                        Game1.addHUDMessage(new HUDMessage($"{npcObj.name} is following you.", 2));
+                        ShowChoresMenu();
                     }
                     else
                     {
                         FreeNpc(npcObj);
-                        Game1.addHUDMessage(new HUDMessage($"{npcObj.name} is not following you.", 2));
+                        Game1.addHUDMessage(new HUDMessage($"{npcObj.name} {Helper.Translation.Get("HUDmessage.stopFollowing")}", 2));
                     }
                 }
+            }
+        }
+
+        private void ActivateFollowing()
+        {
+
+            _currentState = CompanionState.Following;
+            positionHistory.Clear();
+            for (int i = 0; i < FOLLOW_DELAY; i++)
+                positionHistory.Enqueue(npcObj.Position); // ← posición del npc, no del player
+            npcObj.farmerPassesThrough = true;
+            DeactivateControllers(npcObj);
+            Game1.addHUDMessage(new HUDMessage($"{npcObj.name} {Helper.Translation.Get("HUDmessage.following")}", 2));
+        }
+
+        private void ShowChoresMenu()
+        {
+            npcObj.CurrentDialogue.Push(new Dialogue(npcObj, null, Helper.Translation.Get("chores.greeting")));
+            Game1.drawDialogue(npcObj);
+
+            // Wait for dialogue to close, then show options
+            Helper.Events.Display.MenuChanged += OnDialogueClosed;
+        }
+
+        private void OnDialogueClosed(object? sender, MenuChangedEventArgs e)
+        {
+            if (e.OldMenu is not DialogueBox || e.NewMenu != null) return;
+
+            Helper.Events.Display.MenuChanged -= OnDialogueClosed;
+
+            Game1.currentLocation.createQuestionDialogue(
+                Helper.Translation.Get("chores.question"),
+                new Response[]
+                {
+              new Response("follow", Helper.Translation.Get("chores.follow")),
+              new Response("cancel", Helper.Translation.Get("chores.cancel"))
+                },
+                HandleChoresChoice
+            );
+        }
+
+        private void HandleChoresChoice(Farmer who, string selectedKey)
+        {
+            switch (selectedKey)
+            {
+                case "follow":
+                    ActivateFollowing();
+                    break;
+                case "water":
+                    // activar Watering
+                    break;
             }
         }
 

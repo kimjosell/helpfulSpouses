@@ -1,0 +1,10 @@
+{
+  "chores.greeting": "Hello Darling. Do you need something?",
+  "chores.question": "What should I do?",
+  "chores.follow": "Follow me",
+  "chores.cancel": "Never mind",
+
+  "HUDmessage.following": "is following you.",
+  "HUDmessage.stopFollowing": "is not following you"
+
+}
