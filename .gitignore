@@ -361,3 +361,8 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# Language server cache (C# Dev Kit / OmniSharp)
+*.lscache
+
+# macOS
+.DS_Store
