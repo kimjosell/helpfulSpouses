@@ -28,11 +28,20 @@ namespace helpfulSpouses
         static bool _isAnimatingWatering = false;
         string _currentOutfit = "default";
 
-        Response[] choresOptions = new Response[]
-        {
-            new Response("follow", "Quiero que seas mi perra y me sigas"),
-            new Response("shopping", "Ve con el maldito de pierre y compra algo")
-        };
+        // ponytail: valores de PRUEBA, subir a 100 / lo que toque después
+        const int MAX_ENERGY = 100;
+        const int ENERGY_PER_ACTION = 1;   // gasto por tile regado
+        const int REGEN_PER_SECOND = 1;    // recuperación por segundo descansando
+        const int WAKE_THRESHOLD = 60;      // energía necesaria para reanudar el riego
+        static int _energy = MAX_ENERGY;
+        static bool _wateringInterrupted;  // quedó riego a medias por cansancio
+
+        // Crops bloqueados (pathfinding no llega): se saltan y se reintentan al final
+        const int STUCK_SECONDS = 2;       // segundos atorado antes de saltar un crop
+        static readonly HashSet<Vector2> _skippedCrops = new();
+        static bool _retriedBlocked;       // ya se hizo la pasada de reintento
+        static Vector2? _lastTarget;       // crop que se está intentando ahora
+        static int _stuckSeconds;          // cuánto lleva atorado en _lastTarget
 
         public override void Entry(IModHelper helper)
         {
@@ -115,6 +124,17 @@ namespace helpfulSpouses
         {
             if (npcObj == null) return;
 
+            // Recupera energía cuando NO está trabajando activamente
+            if (_currentState != CompanionState.Watering && _currentState != CompanionState.Working && _energy < MAX_ENERGY)
+                _energy = Math.Min(MAX_ENERGY, _energy + REGEN_PER_SECOND);
+
+            // Reanuda el riego que quedó a medias, una vez recuperado
+            if (_wateringInterrupted && _currentState == CompanionState.Following && _energy >= WAKE_THRESHOLD)
+            {
+                _wateringInterrupted = false;
+                TryEnterWateringMode();
+            }
+
             // React to a newly planted seed (give one tick of delay so crop data is ready)
             if (_seedJustPlanted && _currentState == CompanionState.Following)
             {
@@ -137,6 +157,9 @@ namespace helpfulSpouses
         {
             if (npcObj == null) return;
 
+            // Solo riega en la granja, en ningún otro lugar
+            if (!Game1.player.currentLocation.IsFarm || Game1.player.currentLocation.IsGreenhouse) return;
+
             var unwateredCrops = FindUnwateredCrops(Game1.player.currentLocation);
             if (unwateredCrops.Count == 0)
             {
@@ -145,6 +168,10 @@ namespace helpfulSpouses
             }
 
             _currentState = CompanionState.Watering;
+            _skippedCrops.Clear();
+            _retriedBlocked = false;
+            _lastTarget = null;
+            _stuckSeconds = 0;
             DeactivateControllers(npcObj); // stop any current movement cleanly
             Game1.addHUDMessage(new HUDMessage($"{npcObj.name} is going to water the crops!", 2));
             this.Monitor.Log($"Watering mode started. {unwateredCrops.Count} tile(s) to water.", LogLevel.Debug);
@@ -161,22 +188,61 @@ namespace helpfulSpouses
             // If the NPC is still walking to a tile, do nothing until it arrives
             if (npcObj.controller != null) return;
 
+            // Se cansó: deja el riego a medias y vuelve a seguir al jugador
+            if (_energy <= 0)
+            {
+                _wateringInterrupted = true;
+                _currentState = CompanionState.Following;
+                ResetPositionHistory();
+                Game1.addHUDMessage(new HUDMessage($"{npcObj.name} {Helper.Translation.Get("HUDmessage.tired")}", 2));
+                return;
+            }
+
+            Vector2 npcTile = Utility.PointToVector2(npcObj.TilePoint);
             var unwateredCrops = FindUnwateredCrops(npcObj.currentLocation);
 
             if (unwateredCrops.Count == 0)
             {
-                // All done — return to Following and reset the breadcrumb trail
-                _currentState = CompanionState.Following;
-                ResetPositionHistory();
-                Game1.addHUDMessage(new HUDMessage($"{npcObj.name} finished watering!", 2));
+                FinishWatering();
                 return;
             }
 
-            Vector2 targetCrop = unwateredCrops
-                .OrderBy(tile => Vector2.Distance(Utility.PointToVector2(npcObj.TilePoint), tile))
+            // Deja fuera los crops bloqueados; se reintentan una vez al final
+            var reachable = unwateredCrops.Where(c => !_skippedCrops.Contains(c)).ToList();
+            if (reachable.Count == 0)
+            {
+                if (_retriedBlocked)
+                {
+                    // Ya se reintentaron los bloqueados y siguen sin poder regarse: termina
+                    FinishWatering();
+                    return;
+                }
+                _retriedBlocked = true;
+                _skippedCrops.Clear();
+                reachable = unwateredCrops;
+            }
+
+            Vector2 targetCrop = reachable
+                .OrderBy(tile => Vector2.Distance(npcTile, tile))
                 .First();
 
-            Vector2 npcTile = Utility.PointToVector2(npcObj.TilePoint);
+            // ¿Atorado en el mismo crop STUCK_SECONDS segundos? sáltalo y ve al siguiente
+            if (_lastTarget == targetCrop)
+            {
+                if (++_stuckSeconds >= STUCK_SECONDS)
+                {
+                    _skippedCrops.Add(targetCrop);
+                    _stuckSeconds = 0;
+                    _lastTarget = null;
+                    return; // el próximo tick elige el siguiente crop
+                }
+            }
+            else
+            {
+                _lastTarget = targetCrop;
+                _stuckSeconds = 0;
+            }
+
             Vector2[] adjacentOffsets = { new Vector2(0, 1), new Vector2(1, 0), new Vector2(-1, 0), new Vector2(0, -1) };
 
             Vector2 standingTile = adjacentOffsets
@@ -217,12 +283,22 @@ namespace helpfulSpouses
                         Game1.playSound("wateringCan");
                         SpawnWateringParticles(location, targetCrop);
                         dirt.state.Value = 1;
+                        _energy -= ENERGY_PER_ACTION;
 
-                        this.Monitor.Log($"Watered tile at {targetCrop} from {standingTile}", LogLevel.Debug);
+                        this.Monitor.Log($"Watered tile at {targetCrop} from {standingTile}. Energy: {_energy}", LogLevel.Debug);
                     }
                 }
             };
         }
+        // Termina el riego y vuelve a seguir al jugador
+        private void FinishWatering()
+        {
+            if (npcObj == null) return;
+            _currentState = CompanionState.Following;
+            ResetPositionHistory();
+            Game1.addHUDMessage(new HUDMessage($"{npcObj.name} finished watering!", 2));
+        }
+
         private void SpawnWateringParticles(GameLocation location, Vector2 targetCrop)
         {
             location.temporarySprites.Add(new TemporaryAnimatedSprite(
@@ -435,6 +511,8 @@ namespace helpfulSpouses
         private void GameLoop_DayStarted(object? sender, DayStartedEventArgs e)
         {
             _currentState = CompanionState.Idle;
+            _energy = MAX_ENERGY;
+            _wateringInterrupted = false;
 
             try
             {
@@ -508,6 +586,7 @@ namespace helpfulSpouses
                 new Response[]
                 {
               new Response("follow", Helper.Translation.Get("chores.follow")),
+              new Response("settings", Helper.Translation.Get("chores.settings")),
               new Response("cancel", Helper.Translation.Get("chores.cancel"))
                 },
                 HandleChoresChoice
@@ -520,6 +599,9 @@ namespace helpfulSpouses
             {
                 case "follow":
                     ActivateFollowing();
+                    break;
+                case "settings":
+                    Game1.activeClickableMenu = new SettingsMenu();
                     break;
                 case "water":
                     // activar Watering
@@ -580,6 +662,14 @@ namespace helpfulSpouses
                 uiPos - (textSize / 2f),
                 Color.White
             );
+
+            // Barra de energía justo debajo del texto de estado
+            const int barW = 48, barH = 6;
+            int barX = (int)(uiPos.X - barW / 2f);
+            int barY = (int)(uiPos.Y + textSize.Y / 2f + 4f);
+            float ratio = Math.Max(0f, (float)_energy / MAX_ENERGY);
+            e.SpriteBatch.Draw(Game1.fadeToBlackRect, new Microsoft.Xna.Framework.Rectangle(barX, barY, barW, barH), Color.Black * 0.5f);
+            e.SpriteBatch.Draw(Game1.fadeToBlackRect, new Microsoft.Xna.Framework.Rectangle(barX, barY, (int)(barW * ratio), barH), Color.LimeGreen);
         }
     }
 }

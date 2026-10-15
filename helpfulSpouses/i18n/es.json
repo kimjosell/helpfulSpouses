@@ -2,8 +2,10 @@
   "chores.greeting": "Hola Amor, Dime si necesitas algo de mi.",
   "chores.question": "Que debo de hacer?",
   "chores.follow": "Sigueme",
+  "chores.settings": "Ajustes",
   "chores.cancel": "Olvidalo",
 
   "HUDmessage.following": "te esta siguiendo.",
-  "HUDmessage.stopFollowing": "no te esta siguiendo"
+  "HUDmessage.stopFollowing": "no te esta siguiendo",
+  "HUDmessage.tired": "esta cansado y volvera a seguirte un rato."
 }
